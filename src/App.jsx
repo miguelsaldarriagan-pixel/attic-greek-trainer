@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Brain, BookOpen, CheckCircle2, Languages, LibraryBig, RotateCcw, Search, Sigma, Sparkles } from "lucide-react";
+import { Brain, BookOpen, CheckCircle2, ChevronLeft, ChevronRight, Eye, EyeOff, Languages, LibraryBig, RotateCcw, Search, Sigma, Sparkles, Star } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
@@ -176,6 +176,12 @@ const MOOD_DRILLS = [
   { mood: "subjunctive", prompt: "Give the present active subjunctive 1st plural of λύω", answer: "λύωμεν" },
   { mood: "optative", prompt: "Give the present active optative 3rd singular of λύω", answer: "λύοι" },
   { mood: "optative", prompt: "Give the present active optative 3rd plural of λύω", answer: "λύοιεν" },
+  { mood: "subjunctive", prompt: "Give the present active subjunctive 2nd singular of παύω", answer: "παύῃς" },
+  { mood: "subjunctive", prompt: "Give the present active subjunctive 3rd plural of λέγω", answer: "λέγωσι" },
+  { mood: "optative", prompt: "Give the present active optative 1st singular of παύω", answer: "παύοιμι" },
+  { mood: "optative", prompt: "Give the present active optative 2nd plural of λέγω", answer: "λέγοιτε" },
+  { mood: "subjunctive", prompt: "Give the present active subjunctive 3rd singular of ποιέω", answer: "ποιῇ" },
+  { mood: "optative", prompt: "Give the present active optative 3rd singular of ποιέω", answer: "ποιοίη" },
 ];
 
 const DCC_CORE = [
@@ -720,6 +726,52 @@ function scoreMatch(a, b) {
   const y = normalize(b);
   return x === y || x.includes(y) || y.includes(x);
 }
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+  for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+  for (let i = 1; i <= m; i += 1) {
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+function compareGreekAnswer(answer, expected, accentMode = "accent-insensitive", typoTolerance = true) {
+  const rawA = String(answer || "").trim();
+  const rawB = String(expected || "").trim();
+  if (!rawA || !rawB) return { ok: false, mode: "blank" };
+  if (accentMode === "accent-sensitive") {
+    if (rawA === rawB) return { ok: true, mode: "exact" };
+    if (typoTolerance && levenshtein(rawA, rawB) <= 1) return { ok: true, mode: "near" };
+    return { ok: false, mode: "exact-required" };
+  }
+  const a = normalize(rawA);
+  const b = normalize(rawB);
+  if (a === b || a.includes(b) || b.includes(a)) return { ok: true, mode: "normalized" };
+  if (typoTolerance && levenshtein(a, b) <= 1) return { ok: true, mode: "near" };
+  return { ok: false, mode: "normalized-required" };
+}
+function greekTokens(text) {
+  return String(text || "").replace(/[·.,;:!?]/g, "").split(/\s+/).filter(Boolean);
+}
+function categoryBucket(category) {
+  const c = String(category || "").toLowerCase();
+  if (c.includes("verb")) return "verb";
+  if (c.includes("noun")) return "noun";
+  if (c.includes("adjective")) return "adjective";
+  if (c.includes("pronoun")) return "pronoun";
+  if (c.includes("particle")) return "particle";
+  if (c.includes("preposition")) return "preposition";
+  if (c.includes("conjunction")) return "conjunction";
+  if (c.includes("article")) return "article";
+  if (c.includes("participle")) return "participle";
+  if (c.includes("infinitive")) return "infinitive";
+  return "other";
+}
 function loadStoredState() {
   if (typeof window === "undefined") return null;
   try {
@@ -940,11 +992,20 @@ export default function App() {
   const [moodResult, setMoodResult] = useState(null);
   const [lexiconQuery, setLexiconQuery] = useState("");
   const [lexiconFilter, setLexiconFilter] = useState("all");
+  const [lexiconPosFilter, setLexiconPosFilter] = useState("all");
+  const [lexiconSort, setLexiconSort] = useState("rank");
+  const [lexiconPage, setLexiconPage] = useState(1);
   const [readerKey, setReaderKey] = useState("xenophon");
+  const [showTranslation, setShowTranslation] = useState(true);
+  const [selectedReaderWord, setSelectedReaderWord] = useState("");
   const [compositionInput, setCompositionInput] = useState("");
   const [compositionResult, setCompositionResult] = useState(null);
   const [guidedPromptIndex, setGuidedPromptIndex] = useState(0);
+  const [accentMode, setAccentMode] = useState("accent-insensitive");
+  const [typoTolerance, setTypoTolerance] = useState(true);
   const [exportMessage, setExportMessage] = useState("");
+  const [favoriteWords, setFavoriteWords] = useState(stored?.favoriteWords || []);
+  const [wordStatus, setWordStatus] = useState(stored?.wordStatus || {});
 
   const selectedVerb = VERBS.find((v) => v.lemma === selectedVerbLemma) || VERBS[0];
   const selectedNoun = NOUNS.find((n) => n.lemma === selectedNounLemma) || NOUNS[0];
@@ -960,33 +1021,56 @@ export default function App() {
   const lexiconCount = vocab.length;
   const deployReady = lexiconCount >= 100;
 
+  const reviewQueue = [...mistakeLog].slice(0, 8);
+  const pageSize = 24;
+  const favoritesSet = new Set(favoriteWords);
+  const readerDifficulty = {
+    xenophon: "Intermediate",
+    plato: "Intermediate",
+    lysias: "Intermediate",
+  };
+  const readerPassages = AUTHOR_READERS[readerKey] || [];
+  const selectedReaderGloss = selectedReaderWord
+    ? vocab.find((v) => normalize(v.greek) === normalize(selectedReaderWord) || normalize(v.greek).split(" ")[0] === normalize(selectedReaderWord))
+    : null;
+
   const lexiconRows = useMemo(() => {
     const q = normalize(lexiconQuery);
-    return vocab
+    const filtered = vocab
       .filter((v) => !q || normalize(v.greek).includes(q) || normalize(v.meaning).includes(q))
       .filter((v) => lexiconFilter === "all" ? true : v.source === lexiconFilter)
-      .sort((a, b) => {
-        if (lexiconFilter === "dcc") {
-          return (a.rank || 999999) - (b.rank || 999999);
-        }
-        return 0;
-      })
-      .slice(0, 120);
-  }, [vocab, lexiconQuery, lexiconFilter]);
+      .filter((v) => lexiconPosFilter === "all" ? true : categoryBucket(v.category) === lexiconPosFilter);
+
+    const sorted = [...filtered].sort((a, b) => {
+      if (lexiconSort === "rank") return (a.rank || 999999) - (b.rank || 999999);
+      if (lexiconSort === "alpha") return a.greek.localeCompare(b.greek, "el");
+      if (lexiconSort === "semantic") return String(a.semanticGroup || "").localeCompare(String(b.semanticGroup || ""));
+      return 0;
+    });
+    return sorted;
+  }, [vocab, lexiconQuery, lexiconFilter, lexiconPosFilter, lexiconSort]);
+  const lexiconPageCount = Math.max(1, Math.ceil(lexiconRows.length / pageSize));
+  const pagedLexiconRows = lexiconRows.slice((lexiconPage - 1) * pageSize, lexiconPage * pageSize);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("attic-greek-trainer-vnext", JSON.stringify({ mistakeLog, studyStats }));
-  }, [mistakeLog, studyStats]);
+    window.localStorage.setItem("attic-greek-trainer-vnext", JSON.stringify({ mistakeLog, studyStats, favoriteWords, wordStatus }));
+  }, [mistakeLog, studyStats, favoriteWords, wordStatus]);
+
+  useEffect(() => {
+    setLexiconPage(1);
+  }, [lexiconQuery, lexiconFilter, lexiconPosFilter, lexiconSort]);
 
   const resetProgress = () => {
     setMistakeLog([]);
     setStudyStats({ totalAnswered: 0, totalCorrect: 0, streak: 0, lastStudyDate: null });
+    setFavoriteWords([]);
+    setWordStatus({});
     setExportMessage("Progress reset.");
     if (typeof window !== "undefined") window.localStorage.removeItem("attic-greek-trainer-vnext");
   };
   const exportProgress = async () => {
-    const payload = JSON.stringify({ mistakeLog, studyStats }, null, 2);
+    const payload = JSON.stringify({ mistakeLog, studyStats, favoriteWords, wordStatus }, null, 2);
     try {
       await navigator.clipboard.writeText(payload);
       setExportMessage("Progress copied to clipboard.");
@@ -1003,8 +1087,9 @@ export default function App() {
   const trainer = makeTrainerPrompt();
 
   const submitTrainer = () => {
-    const ok = scoreMatch(trainerAnswer, trainer.answer);
-    setTrainerFeedback(ok ? "correct" : "incorrect");
+    const comparison = compareGreekAnswer(trainerAnswer, trainer.answer, accentMode, typoTolerance);
+    const ok = comparison.ok;
+    setTrainerFeedback(ok ? `correct (${comparison.mode})` : "incorrect");
     setShowExplanation(true);
     const updatedStreak = computeStreak(studyStats.lastStudyDate, studyStats.streak);
     setStudyStats((prev) => ({ totalAnswered: prev.totalAnswered + 1, totalCorrect: prev.totalCorrect + (ok ? 1 : 0), streak: updatedStreak, lastStudyDate: todayKey() }));
@@ -1069,6 +1154,22 @@ export default function App() {
                 </CardContent>
               </Card>
             </div>
+            <div className="mt-6 grid gap-6 lg:grid-cols-2">
+              <Card className="rounded-3xl shadow-sm">
+                <CardHeader><CardTitle className="text-xl">Due review queue</CardTitle></CardHeader>
+                <CardContent className="space-y-2 text-sm text-slate-600">
+                  {reviewQueue.length === 0 ? <div className="rounded-2xl border p-3">No due review items yet. Get a few answers wrong and the queue will populate for spaced repetition.</div> : reviewQueue.map((item, i) => <div key={i} className="rounded-2xl border p-3"><div className="font-medium text-slate-800">{item.prompt}</div><div>Expected: {item.expected}</div></div>)}
+                </CardContent>
+              </Card>
+              <Card className="rounded-3xl shadow-sm">
+                <CardHeader><CardTitle className="text-xl">Checking mode</CardTitle></CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2 text-sm text-slate-600">
+                  <NativeSelect value={accentMode} onChange={setAccentMode} options={[{value:"accent-insensitive",label:"Accent-insensitive"},{value:"accent-sensitive",label:"Accent-sensitive"}]} />
+                  <NativeSelect value={typoTolerance ? "on" : "off"} onChange={(v)=>setTypoTolerance(v==="on")} options={[{value:"on",label:"Typo tolerance on"},{value:"off",label:"Typo tolerance off"}]} />
+                  <div className="rounded-2xl border p-3 md:col-span-2">Use accent-sensitive mode when you want stricter production practice. Leave typo tolerance on for faster drilling.</div>
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
 
           <TabsContent value="trainer">
@@ -1084,6 +1185,7 @@ export default function App() {
                   </div>
                   <div className="rounded-2xl border p-4"><div className="mb-2 text-xs uppercase tracking-wide text-slate-500">Prompt</div><div className="text-lg font-medium">{trainer.prompt}</div></div>
                   <Input value={trainerAnswer} onChange={(e) => setTrainerAnswer(e.target.value)} placeholder="Type your answer" />
+                  <div className="text-xs text-slate-500">Checking mode: {accentMode === "accent-sensitive" ? "accent-sensitive" : "accent-insensitive"} · typo tolerance {typoTolerance ? "on" : "off"}</div>
                   {trainerFeedback === "correct" && <div className="flex items-center gap-2 rounded-2xl border p-3 text-sm"><CheckCircle2 className="h-4 w-4" /> Correct.</div>}
                   {trainerFeedback === "incorrect" && <div className="rounded-2xl border p-3 text-sm">Not quite. Expected answer: <span className="font-medium">{trainer.answer}</span></div>}
                   {showExplanation && <div className="rounded-2xl border bg-slate-50 p-3 text-sm text-slate-600">{trainer.explanation}</div>}
@@ -1114,25 +1216,24 @@ export default function App() {
             <Card className="rounded-3xl shadow-sm">
               <CardHeader><CardTitle className="flex items-center gap-2 text-xl"><Languages className="h-5 w-5" /> Searchable lexicon</CardTitle></CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid gap-3 md:grid-cols-[1fr_220px]">
-                  <div className="flex items-center gap-2 rounded-2xl border px-3 py-2"><Search className="h-4 w-4 text-slate-500" /><Input value={lexiconQuery} onChange={(e) => setLexiconQuery(e.target.value)} placeholder="Search Greek or English" className="border-0 shadow-none focus-visible:ring-0" /></div>
-                  <NativeSelect
-                    value={lexiconFilter}
-                    onChange={setLexiconFilter}
-                    options={[
-                      { value: "all", label: "All vocabulary" },
-                      { value: "dcc", label: "DCC only" },
-                      { value: "custom", label: "Custom only" },
-                    ]}
-                  />
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="flex items-center gap-2 rounded-2xl border px-3 py-2 md:col-span-2"><Search className="h-4 w-4 text-slate-500" /><Input value={lexiconQuery} onChange={(e) => setLexiconQuery(e.target.value)} placeholder="Search Greek or English" className="border-0 shadow-none focus-visible:ring-0" /></div>
+                  <NativeSelect value={lexiconFilter} onChange={setLexiconFilter} options={[{ value: "all", label: "All sources" },{ value: "dcc", label: "DCC only" },{ value: "custom", label: "Custom only" }]} />
+                  <NativeSelect value={lexiconPosFilter} onChange={setLexiconPosFilter} options={[{value:"all",label:"All parts of speech"},{value:"verb",label:"Verbs"},{value:"noun",label:"Nouns"},{value:"adjective",label:"Adjectives"},{value:"pronoun",label:"Pronouns"},{value:"particle",label:"Particles"},{value:"preposition",label:"Prepositions"},{value:"conjunction",label:"Conjunctions"},{value:"article",label:"Articles"}]} />
                 </div>
-                <div className="text-sm text-slate-500">Showing {lexiconRows.length} entries. DCC rows include frequency rank and semantic group.</div>
+                <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+                  <NativeSelect value={lexiconSort} onChange={setLexiconSort} options={[{value:"rank",label:"Sort by rank"},{value:"alpha",label:"Sort alphabetically"},{value:"semantic",label:"Sort by semantic group"}]} />
+                  <div className="text-sm text-slate-500 self-center">Showing {pagedLexiconRows.length} of {lexiconRows.length} entries on page {lexiconPage}/{lexiconPageCount}.</div>
+                </div>
                 <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                  {lexiconRows.map((row, i) => (
+                  {pagedLexiconRows.map((row, i) => (
                     <div key={i} className="rounded-2xl border p-3 text-sm">
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-medium text-lg">{row.greek}</span>
-                        <Badge variant="outline">{row.category}</Badge>
+                        <div className="flex items-center gap-2">
+                          <button className="rounded p-1 hover:bg-slate-100" onClick={() => setFavoriteWords((prev) => favoritesSet.has(row.greek) ? prev.filter((x) => x !== row.greek) : [...prev, row.greek])}><Star className={`h-4 w-4 ${favoritesSet.has(row.greek) ? "fill-current" : ""}`} /></button>
+                          <Badge variant="outline">{row.category}</Badge>
+                        </div>
                       </div>
                       <div className="text-slate-600">{row.meaning}</div>
                       <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
@@ -1140,9 +1241,19 @@ export default function App() {
                         {row.rank && <span>Rank {row.rank}</span>}
                         {row.semanticGroup && <span>{row.semanticGroup}</span>}
                         <span>{row.source === "dcc" ? "DCC" : "Custom"}</span>
+                        {wordStatus[row.greek] && <span>Status: {wordStatus[row.greek]}</span>}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button variant="outline" className="px-2 py-1 text-xs" onClick={() => setWordStatus((prev) => ({ ...prev, [row.greek]: "new" }))}>New</Button>
+                        <Button variant="outline" className="px-2 py-1 text-xs" onClick={() => setWordStatus((prev) => ({ ...prev, [row.greek]: "weak" }))}>Weak</Button>
+                        <Button variant="outline" className="px-2 py-1 text-xs" onClick={() => setWordStatus((prev) => ({ ...prev, [row.greek]: "known" }))}>Known</Button>
                       </div>
                     </div>
                   ))}
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <Button variant="outline" onClick={() => setLexiconPage((p) => Math.max(1, p - 1))} disabled={lexiconPage === 1}><ChevronLeft className="mr-2 h-4 w-4" /> Previous</Button>
+                  <Button variant="outline" onClick={() => setLexiconPage((p) => Math.min(lexiconPageCount, p + 1))} disabled={lexiconPage === lexiconPageCount}>Next <ChevronRight className="ml-2 h-4 w-4" /></Button>
                 </div>
               </CardContent>
             </Card>
@@ -1152,10 +1263,27 @@ export default function App() {
             <Card className="rounded-3xl shadow-sm">
               <CardHeader><CardTitle className="flex items-center gap-2 text-xl"><BookOpen className="h-5 w-5" /> Author readers</CardTitle></CardHeader>
               <CardContent className="space-y-4">
-                <NativeSelect value={readerKey} onChange={setReaderKey} options={[{value:"xenophon",label:"Xenophon"},{value:"plato",label:"Plato"},{value:"lysias",label:"Lysias"}]} className="max-w-xs" />
-                <div className="space-y-3">
-                  {AUTHOR_READERS[readerKey].map((item, i) => <div key={i} className="rounded-2xl border p-4"><div className="font-medium text-lg">{item.greek}</div><div className="mt-1 text-sm text-slate-600">{item.english}</div></div>)}
+                <div className="flex flex-wrap gap-3">
+                  <NativeSelect value={readerKey} onChange={(v) => { setReaderKey(v); setSelectedReaderWord(""); }} options={[{value:"xenophon",label:"Xenophon"},{value:"plato",label:"Plato"},{value:"lysias",label:"Lysias"}]} className="max-w-xs" />
+                  <Button variant="outline" onClick={() => setShowTranslation((v) => !v)}>{showTranslation ? <EyeOff className="mr-2 h-4 w-4" /> : <Eye className="mr-2 h-4 w-4" />}{showTranslation ? "Hide translation" : "Show translation"}</Button>
                 </div>
+                <div className="text-sm text-slate-500">Difficulty: {readerDifficulty[readerKey]}. Tap a Greek word to see a gloss from the lexicon.</div>
+                <div className="space-y-3">
+                  {readerPassages.map((item, i) => <div key={i} className="rounded-2xl border p-4">
+                    <div className="font-medium text-lg leading-8">
+                      {greekTokens(item.greek).map((tok, j) => <button key={j} className="mr-2 rounded px-1 hover:bg-slate-100" onClick={() => setSelectedReaderWord(tok)}>{tok}</button>)}
+                    </div>
+                    {showTranslation && <div className="mt-1 text-sm text-slate-600">{item.english}</div>}
+                    <div className="mt-3 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600">
+                      <div className="font-medium text-slate-800">Comprehension check</div>
+                      <div>Can you identify the main verb and the subject before revealing the translation?</div>
+                    </div>
+                  </div>)}
+                </div>
+                {selectedReaderWord && <div className="rounded-2xl border p-4 text-sm">
+                  <div className="font-medium text-slate-800">Gloss for {selectedReaderWord}</div>
+                  {selectedReaderGloss ? <div className="mt-1 text-slate-600">{selectedReaderGloss.meaning}</div> : <div className="mt-1 text-slate-500">No exact gloss found in the current lexicon.</div>}
+                </div>}
               </CardContent>
             </Card>
           </TabsContent>
@@ -1175,7 +1303,7 @@ export default function App() {
                 <CardContent className="space-y-4">
                   <div className="rounded-2xl border bg-slate-50 p-4 text-sm">{currentMoodDrill.prompt}</div>
                   <Input value={moodInput} onChange={(e) => setMoodInput(e.target.value)} placeholder="Type Greek form" />
-                  <div className="flex gap-2"><Button onClick={() => setMoodResult(scoreMatch(moodInput, currentMoodDrill.answer) ? "Correct" : `Try again — ${currentMoodDrill.answer}`)}>Check</Button><Button variant="outline" onClick={() => { setMoodIndex((moodIndex + 1) % MOOD_DRILLS.length); setMoodInput(""); setMoodResult(null); }}>Next</Button></div>
+                  <div className="flex gap-2"><Button onClick={() => (() => { const comparison = compareGreekAnswer(moodInput, currentMoodDrill.answer, accentMode, typoTolerance); setMoodResult(comparison.ok ? `Correct (${comparison.mode})` : `Try again — ${currentMoodDrill.answer}`); })()}>Check</Button><Button variant="outline" onClick={() => { setMoodIndex((moodIndex + 1) % MOOD_DRILLS.length); setMoodInput(""); setMoodResult(null); }}>Next</Button></div>
                   {moodResult && <div className="text-sm">{moodResult}</div>}
                 </CardContent>
               </Card>
@@ -1208,7 +1336,7 @@ export default function App() {
           <TabsContent value="library">
             <div className="grid gap-6 lg:grid-cols-3">
               <Card className="rounded-3xl shadow-sm lg:col-span-2"><CardHeader><CardTitle className="text-xl">Principal parts</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{VERBS.slice(0, 12).map((v) => <div key={v.lemma} className="rounded-2xl border p-4 text-sm"><div className="text-lg font-medium">{v.lemma}</div><div className="text-slate-500">{v.meaning}</div><div className="mt-2 space-y-1">{v.principalParts.map((p, i) => <div key={i}>{i + 1}. {p}</div>)}</div></div>)}</CardContent></Card>
-              <Card className="rounded-3xl shadow-sm"><CardHeader><CardTitle className="text-xl">Form library</CardTitle></CardHeader><CardContent className="space-y-3 text-sm text-slate-600"><div className="rounded-2xl border p-3">Verbs: {VERBS.length}</div><div className="rounded-2xl border p-3">Nouns: {NOUNS.length}</div><div className="rounded-2xl border p-3">Adjectives: {ADJECTIVES.length}</div><div className="rounded-2xl border p-3">Pronouns: {PRONOUNS.length}</div><div className="rounded-2xl border p-3">Participles: {PARTICIPLES.length}</div><div className="rounded-2xl border p-3">Total lexicon rows: {vocab.length}</div><div className="rounded-2xl border p-3">DCC rows: {vocab.filter((x) => x.source === "dcc").length}</div><div className="rounded-2xl border p-3">Author packs: {Object.keys(AUTHOR_READERS).length}</div></CardContent></Card>
+              <Card className="rounded-3xl shadow-sm"><CardHeader><CardTitle className="text-xl">Form library</CardTitle></CardHeader><CardContent className="space-y-3 text-sm text-slate-600"><div className="rounded-2xl border p-3">Verbs: {VERBS.length}</div><div className="rounded-2xl border p-3">Nouns: {NOUNS.length}</div><div className="rounded-2xl border p-3">Adjectives: {ADJECTIVES.length}</div><div className="rounded-2xl border p-3">Pronouns: {PRONOUNS.length}</div><div className="rounded-2xl border p-3">Participles: {PARTICIPLES.length}</div><div className="rounded-2xl border p-3">Total lexicon rows: {vocab.length}</div><div className="rounded-2xl border p-3">DCC rows: {vocab.filter((x) => x.source === "dcc").length}</div><div className="rounded-2xl border p-3">Favorite words: {favoriteWords.length}</div><div className="rounded-2xl border p-3">Author packs: {Object.keys(AUTHOR_READERS).length}</div></CardContent></Card>
             </div>
           </TabsContent>
         </Tabs>
