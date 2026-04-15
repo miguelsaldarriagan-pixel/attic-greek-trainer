@@ -1006,6 +1006,9 @@ export default function App() {
   const [exportMessage, setExportMessage] = useState("");
   const [favoriteWords, setFavoriteWords] = useState(stored?.favoriteWords || []);
   const [wordStatus, setWordStatus] = useState(stored?.wordStatus || {});
+  const [flashIndex, setFlashIndex] = useState(0);
+  const [showFlashBack, setShowFlashBack] = useState(false);
+  const [flashFilter, setFlashFilter] = useState("smart-review");
 
   const selectedVerb = VERBS.find((v) => v.lemma === selectedVerbLemma) || VERBS[0];
   const selectedNoun = NOUNS.find((n) => n.lemma === selectedNounLemma) || NOUNS[0];
@@ -1060,6 +1063,11 @@ export default function App() {
   useEffect(() => {
     setLexiconPage(1);
   }, [lexiconQuery, lexiconFilter, lexiconPosFilter, lexiconSort]);
+
+  useEffect(() => {
+    setFlashIndex(0);
+    setShowFlashBack(false);
+  }, [flashFilter]);
 
   const resetProgress = () => {
     setMistakeLog([]);
@@ -1116,13 +1124,14 @@ export default function App() {
         </div>
 
         <Tabs defaultValue="dashboard" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-4 gap-1 rounded-2xl bg-white p-1 shadow-sm md:grid-cols-8">
+          <TabsList className="grid w-full grid-cols-4 gap-1 rounded-2xl bg-white p-1 shadow-sm md:grid-cols-9">
             <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
             <TabsTrigger value="trainer">Trainer</TabsTrigger>
             <TabsTrigger value="engine">Engine</TabsTrigger>
             <TabsTrigger value="lexicon">Lexicon</TabsTrigger>
             <TabsTrigger value="readers">Readers</TabsTrigger>
             <TabsTrigger value="lessons">Lessons</TabsTrigger>
+            <TabsTrigger value="flashcards">Flashcards</TabsTrigger>
             <TabsTrigger value="composition">Composition</TabsTrigger>
             <TabsTrigger value="library">Library</TabsTrigger>
           </TabsList>
@@ -1149,6 +1158,8 @@ export default function App() {
                   <div className="rounded-2xl border p-3 flex items-center justify-between"><span>Mistakes logged</span><Badge>{mistakeLog.length}</Badge></div>
                   <div className="rounded-2xl border p-3 flex items-center justify-between"><span>Lexicon rows</span><Badge>{lexiconCount}</Badge></div>
                   <div className="rounded-2xl border p-3 flex items-center justify-between"><span>Deploy readiness</span><Badge>{deployReady ? "Ready" : "Almost there"}</Badge></div>
+                  <div className="rounded-2xl border p-3 flex items-center justify-between"><span>Favorites</span><Badge>{favoriteWords.length}</Badge></div>
+                  <div className="rounded-2xl border p-3 flex items-center justify-between"><span>Weak words</span><Badge>{Object.values(wordStatus).filter((x) => x === "weak").length}</Badge></div>
                   <div className="rounded-2xl border p-3"><div className="font-medium">Adaptive next focus</div><div className="mt-1 text-xs">{mistakeLog.length === 0 ? "Build baseline with mixed drills." : `Prioritize ${mistakeLog[0]?.kind || "review"} and related forms.`}</div></div>
                   <div className="rounded-2xl border p-3"><div className="font-medium">Weekly target</div><div className="mt-1 text-xs">Complete 20 prompts with 80%+ accuracy. Review mistakes first.</div></div>
                 </CardContent>
@@ -1305,6 +1316,69 @@ export default function App() {
                   <Input value={moodInput} onChange={(e) => setMoodInput(e.target.value)} placeholder="Type Greek form" />
                   <div className="flex gap-2"><Button onClick={() => (() => { const comparison = compareGreekAnswer(moodInput, currentMoodDrill.answer, accentMode, typoTolerance); setMoodResult(comparison.ok ? `Correct (${comparison.mode})` : `Try again — ${currentMoodDrill.answer}`); })()}>Check</Button><Button variant="outline" onClick={() => { setMoodIndex((moodIndex + 1) % MOOD_DRILLS.length); setMoodInput(""); setMoodResult(null); }}>Next</Button></div>
                   {moodResult && <div className="text-sm">{moodResult}</div>}
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="flashcards">
+            <div className="grid gap-6 lg:grid-cols-[1fr_0.9fr]">
+              <Card className="rounded-3xl shadow-sm">
+                <CardHeader><CardTitle className="text-xl">Smart flashcards</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+                    <NativeSelect
+                      value={flashFilter}
+                      onChange={setFlashFilter}
+                      options={[
+                        { value: "smart-review", label: "Smart review" },
+                        { value: "favorites", label: "Favorites" },
+                        { value: "weak", label: "Weak words" },
+                        { value: "dcc", label: "Top DCC" },
+                      ]}
+                    />
+                    <div className="text-sm text-slate-500 self-center">{flashcardPool.length} cards available in this deck.</div>
+                  </div>
+                  {currentFlashcard ? (
+                    <div className="rounded-3xl border p-6 bg-slate-50 min-h-[240px] flex flex-col justify-between">
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-500">Front</div>
+                        <div className="mt-3 text-3xl font-semibold">{currentFlashcard.greek}</div>
+                        <div className="mt-2 text-sm text-slate-500">{currentFlashcard.category}</div>
+                        {showFlashBack && (
+                          <div className="mt-6 space-y-2">
+                            <div className="text-sm text-slate-600">{currentFlashcard.meaning}</div>
+                            <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                              <span>{currentFlashcard.chapter}</span>
+                              {currentFlashcard.rank && <span>Rank {currentFlashcard.rank}</span>}
+                              {currentFlashcard.semanticGroup && <span>{currentFlashcard.semanticGroup}</span>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="mt-6 flex flex-wrap gap-2">
+                        <Button onClick={() => setShowFlashBack((v) => !v)}>{showFlashBack ? "Hide back" : "Show back"}</Button>
+                        <Button variant="outline" onClick={() => setWordStatus((prev) => currentFlashcard ? ({ ...prev, [currentFlashcard.greek]: "weak" }) : prev)}>Mark weak</Button>
+                        <Button variant="outline" onClick={() => setWordStatus((prev) => currentFlashcard ? ({ ...prev, [currentFlashcard.greek]: "known" }) : prev)}>Mark known</Button>
+                        <Button variant="outline" onClick={() => setFavoriteWords((prev) => currentFlashcard && favoritesSet.has(currentFlashcard.greek) ? prev.filter((x) => x !== currentFlashcard.greek) : currentFlashcard ? [...prev, currentFlashcard.greek] : prev)}>{currentFlashcard && favoritesSet.has(currentFlashcard.greek) ? "Unfavorite" : "Favorite"}</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border p-4 text-sm text-slate-600">No cards in this deck yet. Mark words as favorite or weak in the lexicon first.</div>
+                  )}
+                  <div className="flex items-center justify-between gap-3">
+                    <Button variant="outline" onClick={() => { setFlashIndex((i) => Math.max(0, i - 1)); setShowFlashBack(false); }} disabled={flashIndex === 0}><ChevronLeft className="mr-2 h-4 w-4" /> Previous</Button>
+                    <div className="text-sm text-slate-500">{currentFlashcard ? `${flashIndex + 1}/${flashcardPool.length}` : "0/0"}</div>
+                    <Button variant="outline" onClick={() => { setFlashIndex((i) => Math.min(Math.max(flashcardPool.length - 1, 0), i + 1)); setShowFlashBack(false); }} disabled={flashIndex >= flashcardPool.length - 1}>Next <ChevronRight className="ml-2 h-4 w-4" /></Button>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="rounded-3xl shadow-sm">
+                <CardHeader><CardTitle className="text-xl">Why this helps</CardTitle></CardHeader>
+                <CardContent className="space-y-3 text-sm text-slate-600">
+                  <div className="rounded-2xl border p-3">Smart review prioritizes weak words, then favorites, then high-frequency DCC items.</div>
+                  <div className="rounded-2xl border p-3">You can build a custom deck just by starring words in the lexicon.</div>
+                  <div className="rounded-2xl border p-3">Marking a card known or weak updates your long-term review flow.</div>
                 </CardContent>
               </Card>
             </div>
